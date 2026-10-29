@@ -68,12 +68,15 @@ public class SealedAndMissingMapTests
         int Id { get; set; }
     }
 
+    // STAGE 2: superseded by proxy support — interface destinations now map
+    // through a runtime proxy instead of throwing.
     [Fact]
-    public void InterfaceDestinationThrowsMappingException()
+    public void InterfaceDestinationMapsThroughProxy()
     {
         var mapper = new MapperConfiguration(cfg => cfg.CreateMap<A, IDest>()).CreateMapper();
-        var ex = Assert.Throws<AutoMapperMappingException>(() => mapper.Map<IDest>(new A()));
-        Assert.Contains("interface", ex.Message);
+        var result = mapper.Map<IDest>(new A { Id = 5 });
+        Assert.Equal(5, result.Id);
+        Assert.NotEqual(typeof(IDest), result.GetType());
     }
 
     public abstract class AbstractDest
@@ -81,10 +84,14 @@ public class SealedAndMissingMapTests
         public int Id { get; set; }
     }
 
+    // STAGE 2: superseded by proxy support — abstract destinations now map
+    // through a runtime proxy subclass instead of throwing.
     [Fact]
-    public void AbstractDestinationThrowsMappingException()
+    public void AbstractDestinationMapsThroughProxy()
     {
         var mapper = new MapperConfiguration(cfg => cfg.CreateMap<A, AbstractDest>()).CreateMapper();
-        Assert.Throws<AutoMapperMappingException>(() => mapper.Map<AbstractDest>(new A()));
+        var result = mapper.Map<AbstractDest>(new A { Id = 6 });
+        Assert.Equal(6, result.Id);
+        Assert.NotEqual(typeof(AbstractDest), result.GetType());
     }
 }

@@ -15,11 +15,28 @@ public sealed class ResolutionContext
     public IMapper Mapper { get; }
     public IConfigurationProvider Configuration { get; }
     public IMappingOperationOptions? Options { get; }
+    /// <summary>Runtime features registered on this configuration, reachable
+    /// from resolvers, converters, and hooks. Empty when the configuration
+    /// is not a DDMapper MapperConfiguration or no runtime features were
+    /// registered. This is the Stage 3 accessor for the features system.</summary>
+    public Features.Features<Features.IRuntimeFeature> Features =>
+        (Configuration as MapperConfiguration)?.RuntimeFeatures ?? EmptyRuntimeFeatures;
+    /// <summary>Alias of <see cref="Features"/>.</summary>
+    public Features.Features<Features.IRuntimeFeature> RuntimeFeatures => Features;
+    /// <summary>Mapping features registered on this configuration.</summary>
+    public Features.Features<Features.IMappingFeature> MappingFeatures =>
+        (Configuration as MapperConfiguration)?.MappingFeatures ?? EmptyMappingFeatures;
+    private static readonly Features.Features<Features.IRuntimeFeature> EmptyRuntimeFeatures = new();
+    private static readonly Features.Features<Features.IMappingFeature> EmptyMappingFeatures = new();
     internal TypeMap? TypeMap { get; set; }
     internal int Depth { get; set; }
     internal HashSet<object> ActiveSources { get; } = new(ReferenceEqualityComparer.Instance);
     internal Dictionary<object, object> ReferenceCache { get; } = new(ReferenceEqualityComparer.Instance);
-    internal IDictionary<string, object?> Items => Options?.Items ?? EmptyItems;
+    /// <summary>Per-operation items, supplied through the Map options
+    /// (for example <c>opts.Items["key"] = value</c>). Resolvers,
+    /// converters, and hooks read them through the context; empty when
+    /// no options were supplied.</summary>
+    public IDictionary<string, object?> Items => Options?.Items ?? EmptyItems;
     private static readonly Dictionary<string, object?> EmptyItems = new();
 
     internal ResolutionContext Child(TypeMap? typeMap) =>

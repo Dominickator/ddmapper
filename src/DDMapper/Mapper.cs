@@ -139,6 +139,24 @@ public sealed class Mapper : IMapper
             if (destType.IsAssignableFrom(sourceType)) return source;
         }
 
+        // --- STAGE 2 (proxy fallback) BEGIN: an unmapped interface/abstract
+        // destination is satisfied by a conventional proxy copy (matching source
+        // members by name, mapped recursively), so nested interface members and
+        // interface collection elements work even without an explicit map for
+        // that pair. Unproxyable destinations fall through to the chain below
+        // and keep the usual "no map configured" failure. A source that already
+        // implements the destination keeps the Stage 1 assignable behaviour
+        // (returned as-is) instead of being copied into a proxy. ---
+        if (destType.IsAssignableFrom(sourceType)
+            && !(MapperRuntime.IsCollectionType(sourceType) && MapperRuntime.IsCollectionType(destType)))
+            return source;
+        if ((destType.IsInterface || destType.IsAbstract)
+            && Execution.ProxyGenerator.TryCreateProxy(destType, out var proxyInstance)
+            && proxyInstance != null
+            && TryPopulateProxy(source, sourceType, proxyInstance, ctx))
+            return proxyInstance;
+        // --- STAGE 2 (proxy fallback) END ---
+
         if (FallbackChain.TryMap(this, ctx, source, sourceType, destType, out var fallbackResult))
             return fallbackResult;
 
@@ -153,5 +171,51 @@ public sealed class Mapper : IMapper
             try { return Activator.CreateInstance(destType)!; } catch { /* fall through */ }
         }
         return Activator.CreateInstance(typeof(Dictionary<,>).MakeGenericType(keyType, valueType))!;
+    }
+
+    /// <summary>
+    /// STAGE 2 (proxy fallback): copies matching readable source members onto a
+    /// proxy destination by name (case-insensitive), mapping each value
+    /// recursively. Members whose value is already on the active stack are
+    /// skipped so cyclic graphs terminate instead of recursing forever.
+    /// </summary>
+    private bool TryPopulateProxy(object source, Type sourceType, object proxy, ResolutionContext ctx)
+    {
+        bool added = ctx.ActiveSources.Add(source);
+        try
+        {
+            var sourceMembers = MemberMatcher.ReadableMembers(sourceType).ToList();
+            foreach (var prop in proxy.GetType().GetProperties(System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance))
+            {
+                if (!prop.CanWrite || prop.GetSetMethod() == null) continue;
+                var member = sourceMembers.FirstOrDefault(m =>
+                    string.Equals(m.Name, prop.Name, StringComparison.OrdinalIgnoreCase));
+                if (member == null) continue;
+                var value = MemberMatcher.GetValue(member, source);
+                if (value == null)
+                {
+                    if (!prop.PropertyType.IsValueType || Nullable.GetUnderlyingType(prop.PropertyType) != null)
+                        prop.SetValue(proxy, null);
+                    continue;
+                }
+                if (ctx.ActiveSources.Contains(value)) continue;
+                prop.SetValue(proxy, MapInternal(value, value.GetType(), prop.PropertyType, null, ctx));
+            }
+            return true;
+        }
+        catch (AutoMapperMappingException)
+        {
+            // A nested mapping failure stays a mapping failure; do not mask it
+            // as a generic fallback miss.
+            throw;
+        }
+        catch
+        {
+            return false;
+        }
+        finally
+        {
+            if (added) ctx.ActiveSources.Remove(source);
+        }
     }
 }

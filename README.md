@@ -47,7 +47,7 @@ services.AddDDMapper(cfg => cfg.AddProfile<ShopProfile>());
 // AddAutoMapper(...) is an alias with the same behaviour.
 ```
 
-## What Stage 1 includes
+## What DDMapper includes
 
 - Configuration API: `MapperConfiguration`, `MapperConfigurationExpression`,
   `Profile`, `IMapperConfigurationExpression`, `IConfigurationProvider`
@@ -60,7 +60,8 @@ services.AddDDMapper(cfg => cfg.AddProfile<ShopProfile>());
   cached in a thread-safe dictionary, built lazily on first `Map` or eagerly via
   `CompileMappings()`
 - Destination construction: parameterless constructor, constructor mapping matched
-  by parameter name, or `ConstructUsing`
+  by parameter name, `ConstructUsing`, or a runtime-generated proxy for interface
+  and abstract destinations (Reflection.Emit, with `INotifyPropertyChanged`)
 - Null handling flags: `AllowNullDestinationValues`, `AllowNullCollections`
 - Cycle handling: reference cache when `PreserveReferences()` is on, plus a
   cycle guard that returns the default value instead of recursing forever
@@ -77,18 +78,43 @@ services.AddDDMapper(cfg => cfg.AddProfile<ShopProfile>());
   dynamic / string-dictionary mapping in both directions
 - Generics: closed-generic pairs work; maps declared for open generic definitions
   (e.g. `CreateMap(typeof(Source<>), typeof(Dest<>))`) are closed at plan time
-  (conventional matching plus hooks/converters; custom member expressions recorded
-  against open parameters are not replayed)
+  (conventional matching plus hooks/converters/transformers; custom member
+  expressions recorded against open parameters cannot be replayed — see below)
+- `ProjectTo` / `IQueryable` projection: a LINQ expression tree built from the
+  configuration's TypeMaps, with null-safe chain rewriting, polymorphic dispatch
+  over included-derived maps, and clear projection exceptions for anything that
+  cannot translate to a query (delegate conditions, resolver instances, member
+  converters) instead of silent client evaluation
+- Attribute-driven configuration (`AutoMapper.Configuration.Annotations`):
+  ignore, source-member redirect, mapping order, null substitute,
+  use-destination-value, converter/resolver attributes, map-at-runtime —
+  precedence is fluent config > destination attribute > source attribute >
+  convention, applied per behavior
+- Features system (`AutoMapper.Features`): global features run once at build,
+  mapping features wrap each plan invocation, runtime features are reachable
+  from resolvers via `ResolutionContext`
+- Full resolver / converter / transformer surface: value resolvers, member value
+  resolvers, type converters, value converters, and value transformers (global,
+  map-level, then member-level ordering), all instantiated through
+  `ConstructServicesUsing` when one is registered
 - DI helper in the same project: `AutoMapper.Extensions.Microsoft.DependencyInjection`
 
-## What Stage 1 does NOT include (out of scope, by design)
+## Known limits (documented, by design)
 
-- `ProjectTo` / `IQueryable` projection
-- Runtime proxy generation for interface destinations — mapping to an interface or
-  abstract destination throws a clear `AutoMapperMappingException` (map to a
-  concrete type instead)
-- Attribute-driven configuration, the features system, and the full
-  value-resolver / converter / transformer surface beyond the basics above
+- Projection runs against in-memory providers in this repo's tests; a real
+  EF/database provider was not tested here, and a provider that cannot translate
+  a given expression will fail at its own translation step.
+- Attribute-driven configuration applies to property maps only, not path maps
+  or constructor parameters.
+- A path-map member resolver receives a null source-member value (paths have
+  no source chain).
+- Custom member expressions recorded against open generic type parameters
+  cannot be replayed for closed maps: .NET expression trees cannot hold a
+  lambda over an open generic type, and the public open-map handle exposes no
+  per-member surface to record one on. Closed maps still inherit hooks,
+  converters, transformers, and conventional matching.
+- The non-generic map handle has no type-based `ConvertUsing<TConverter>`
+  (instance/function forms only).
 
 ## Sealing
 
@@ -101,22 +127,31 @@ map throw the same. Configure everything before creating a mapper.
 | Area | Namespace |
 | --- | --- |
 | Public API (config, mapper, maps, naming, exceptions) | `AutoMapper` |
+| Configuration expressions and annotations | `AutoMapper.Configuration`, `AutoMapper.Configuration.Annotations` |
+| Plan builder, proxies, execution helpers | `AutoMapper.Execution` |
+| Internal runtime types | `AutoMapper.Internal` |
+| LINQ projection | `AutoMapper.QueryableExtensions` |
+| Features system | `AutoMapper.Features` |
 | DI helper | `AutoMapper.Extensions.Microsoft.DependencyInjection` |
-| Internal plan cache / plan builder / runtime helpers | `AutoMapper` (internal types; no separate internal namespace is exposed in Stage 1) |
 
-Sub-namespaces mirroring the familiar shape (`AutoMapper.Configuration`,
-`AutoMapper.Execution`, `AutoMapper.Internal`, `AutoMapper.QueryableExtensions`)
-are reserved for later stages as those surfaces land; Stage 1 keeps one library
-project with all code under `AutoMapper.*`, so no consumer `using` directive
-needs to change when those namespaces appear.
+All code lives under `AutoMapper.*`, so consumer code with `using AutoMapper;`
+compiles unchanged against this library; only the package reference changes.
 
 ## Building and testing
 
 ```sh
 ~/workspace/.dotnet/dotnet build ~/workspace/ddmapper/DDMapper.sln
-~/workspace/.dotnet/dotnet test ~/workspace/ddmapper/DDMapper.sln
 ```
 
-The test project currently holds smoke tests only (basic mapping, flattening,
-string-to-enum fallback, `MapFrom`, `ReverseMap`, missing-map error, validation
-error). The full test suite is owned by a later stage.
+`dotnet test` does not run in this sandbox (the vstest testhost channel is
+broken by the sandbox egress proxy). The same xUnit `[Fact]` methods are
+executed by the reflection runner instead, which loads the test DLL and
+invokes every fact directly:
+
+```sh
+cd ~/workspace/ddmapper/tools/reflection-runner
+~/workspace/.dotnet/dotnet run
+```
+
+On a machine where `dotnet test` works, prefer `dotnet test` — the runner
+exists only to give honest execution evidence where vstest cannot connect.

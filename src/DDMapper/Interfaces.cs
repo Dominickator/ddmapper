@@ -32,6 +32,40 @@ public interface IValueResolver<TSource, TDestination, TMember>
     TMember Resolve(TSource source, TDestination destination, TMember destMember, ResolutionContext context);
 }
 
+/// <summary>Resolves a single destination member value from the resolved
+/// source member value as well as the destination member value. Unlike
+/// <see cref="IValueResolver{TSource, TDestination, TMember}"/>, which
+/// receives only the destination side, this variant also receives the
+/// source member value (the conventionally resolved source value, or the
+/// default when no source member matches).</summary>
+public interface IMemberValueResolver<TSource, TDestination, TSourceMember, TDestinationMember>
+{
+    TDestinationMember Resolve(TSource source, TDestination destination, TSourceMember sourceMember, TDestinationMember destMember, ResolutionContext context);
+}
+
+/// <summary>Converts one member value to another member value. Applied
+/// after the source member value is resolved and before assignment; the
+/// result is already in destination-member form, so it is not mapped
+/// again through the nested-mapping path.</summary>
+public interface IValueConverter<TSourceMember, TDestinationMember>
+{
+    TDestinationMember Convert(TSourceMember sourceMember, TDestinationMember destMember, ResolutionContext context);
+}
+
+/// <summary>One registered value transformer: a function applied to member
+/// values whose destination type the registration covers.</summary>
+public sealed class ValueTransformerRegistration
+{
+    internal ValueTransformerRegistration(Type memberType, Func<object?, object?> transform)
+    {
+        MemberType = memberType;
+        Transform = transform;
+    }
+    public Type MemberType { get; }
+    public Func<object?, object?> Transform { get; }
+    internal bool AppliesTo(Type destinationType) => MemberType.IsAssignableFrom(destinationType);
+}
+
 /// <summary>Action run before or after a map.</summary>
 public interface IMappingAction<in TSource, in TDestination>
 {
@@ -59,6 +93,8 @@ public interface IConfigurationProvider
     bool AllowNullCollections { get; }
     /// <summary>Maximum nesting depth for a single map; 0 means unlimited.</summary>
     int MaxDepthDefault { get; }
+    /// <summary>Global value transformers, in registration order.</summary>
+    IReadOnlyList<ValueTransformerRegistration> GlobalValueTransformers { get; }
 }
 
 /// <summary>Fluent surface used to configure a single source/destination pair.</summary>
@@ -75,6 +111,12 @@ public interface IMappingExpression<TSource, TDestination>
         Action<ISourceMemberConfigurationExpression> memberOptions);
     IMappingExpression<TSource, TDestination> ConvertUsing(Func<TSource, TDestination> converter);
     IMappingExpression<TSource, TDestination> ConvertUsing(ITypeConverter<TSource, TDestination> converter);
+    IMappingExpression<TSource, TDestination> ConvertUsing<TConverter>() where TConverter : class;
+    IMappingExpression<TSource, TDestination> BeforeMap<TAction>() where TAction : class, IMappingAction<TSource, TDestination>;
+    IMappingExpression<TSource, TDestination> BeforeMap(IMappingAction<TSource, TDestination> action);
+    IMappingExpression<TSource, TDestination> AfterMap<TAction>() where TAction : class, IMappingAction<TSource, TDestination>;
+    IMappingExpression<TSource, TDestination> AfterMap(IMappingAction<TSource, TDestination> action);
+    IMappingExpression<TSource, TDestination> AddValueTransformer<TMember>(Func<TMember, TMember> transformer);
     IMappingExpression<TSource, TDestination> ConstructUsing(Func<TSource, TDestination> constructor);
     IMappingExpression<TSource, TDestination> ConstructUsing(Func<TSource, ResolutionContext, TDestination> constructor);
     IMappingExpression<TSource, TDestination> BeforeMap(Action<TSource, TDestination> action);
@@ -96,6 +138,12 @@ public interface IMemberConfigurationExpression<TSource, TDestination, TMember>
     void MapFrom<TSourceMember>(Expression<Func<TSource, TSourceMember>> sourceMember);
     void MapFrom(Expression<Func<TSource, TDestination, TMember>> sourceMember);
     void MapFrom<TResolver>(TResolver resolver) where TResolver : IValueResolver<TSource, TDestination, TMember>;
+    void MapFrom<TResolver>() where TResolver : class, IValueResolver<TSource, TDestination, TMember>;
+    void MapFrom<TResolver, TSourceMember>(TResolver resolver) where TResolver : IMemberValueResolver<TSource, TDestination, TSourceMember, TMember>;
+    void MapFromMember<TResolver, TSourceMember>() where TResolver : class, IMemberValueResolver<TSource, TDestination, TSourceMember, TMember>;
+    void ConvertUsing<TSourceMember>(IValueConverter<TSourceMember, TMember> converter);
+    void ConvertUsing<TConverter>() where TConverter : class;
+    void AddValueTransformer(Func<TMember, TMember> transformer);
     void Ignore();
     void Condition(Func<TSource, bool> condition);
     void Condition(Func<TSource, TDestination, bool> condition);
@@ -132,6 +180,11 @@ public interface IMapperConfigurationExpression
     void AddProfiles(params Type[] profileTypes);
     void AddProfiles(params System.Reflection.Assembly[] assemblies);
     void ConstructServicesUsing(Func<Type, object> constructor);
+    void AddValueTransformer<TMember>(Func<TMember, TMember> transformer);
+    void AddFeature(Features.IGlobalFeature feature);
+    void AddFeature(Features.IMappingFeature feature);
+    void AddFeature(Features.IRuntimeFeature feature);
+    void AddFeature<TFeature>(TFeature feature) where TFeature : class;
     void RecognizePrefixes(params string[] prefixes);
     void RecognizePostfixes(params string[] postfixes);
     void RecognizeDestinationPrefixes(params string[] prefixes);

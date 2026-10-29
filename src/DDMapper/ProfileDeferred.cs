@@ -25,6 +25,12 @@ internal sealed class DeferredMappingExpression<TSource, TDestination> : IMappin
         => Record(m => m.ForSourceMember(s, o));
     public IMappingExpression<TSource, TDestination> ConvertUsing(Func<TSource, TDestination> c) => Record(m => m.ConvertUsing(c));
     public IMappingExpression<TSource, TDestination> ConvertUsing(ITypeConverter<TSource, TDestination> c) => Record(m => m.ConvertUsing(c));
+    public IMappingExpression<TSource, TDestination> ConvertUsing<TConverter>() where TConverter : class => Record(m => m.ConvertUsing<TConverter>());
+    public IMappingExpression<TSource, TDestination> BeforeMap<TAction>() where TAction : class, IMappingAction<TSource, TDestination> => Record(m => m.BeforeMap<TAction>());
+    public IMappingExpression<TSource, TDestination> BeforeMap(IMappingAction<TSource, TDestination> a) => Record(m => m.BeforeMap(a));
+    public IMappingExpression<TSource, TDestination> AfterMap<TAction>() where TAction : class, IMappingAction<TSource, TDestination> => Record(m => m.AfterMap<TAction>());
+    public IMappingExpression<TSource, TDestination> AfterMap(IMappingAction<TSource, TDestination> a) => Record(m => m.AfterMap(a));
+    public IMappingExpression<TSource, TDestination> AddValueTransformer<TMember>(Func<TMember, TMember> t) => Record(m => m.AddValueTransformer(t));
     public IMappingExpression<TSource, TDestination> ConstructUsing(Func<TSource, TDestination> c) => Record(m => m.ConstructUsing(c));
     public IMappingExpression<TSource, TDestination> ConstructUsing(Func<TSource, ResolutionContext, TDestination> c) => Record(m => m.ConstructUsing(c));
     public IMappingExpression<TSource, TDestination> BeforeMap(Action<TSource, TDestination> a) => Record(m => m.BeforeMap(a));

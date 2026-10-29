@@ -28,6 +28,22 @@ public sealed class NonGenericMappingExpression
         _typeMap.PreserveReferences = true;
         return this;
     }
+    public NonGenericMappingExpression BeforeMap(Action<object, object> action)
+    {
+        _typeMap.BeforeMapActions.Add((s, d, ctx) => action(s, d));
+        return this;
+    }
+    public NonGenericMappingExpression AfterMap(Action<object, object> action)
+    {
+        _typeMap.AfterMapActions.Add((s, d, ctx) => action(s, d));
+        return this;
+    }
+    public NonGenericMappingExpression AddValueTransformer<TMember>(Func<TMember, TMember> transformer)
+    {
+        ArgumentNullException.ThrowIfNull(transformer);
+        _typeMap.ValueTransformers.Add(new ValueTransformerRegistration(typeof(TMember), v => transformer(v is TMember typed ? typed : default!)));
+        return this;
+    }
     public NonGenericMappingExpression MaxDepth(int depth)
     {
         _typeMap.MaxDepth = depth;
@@ -103,7 +119,16 @@ public sealed class MapperConfigurationExpression : IMapperConfigurationExpressi
         {
             if (!typeof(Profile).IsAssignableFrom(type))
                 throw new AutoMapperConfigurationException($"Type {type.FullName} is not a Profile and cannot be added as one.");
-            AddProfile((Profile)Activator.CreateInstance(type)!);
+            Profile profile;
+            try { profile = (Profile)Activator.CreateInstance(type)!; }
+            catch
+            {
+                // No parameterless constructor: route through the service
+                // constructor (which falls back to default construction and
+                // raises the clear configuration error when that fails).
+                profile = (Profile)Configuration.ServiceConstructor(type);
+            }
+            AddProfile(profile);
         }
     }
 
@@ -120,6 +145,49 @@ public sealed class MapperConfigurationExpression : IMapperConfigurationExpressi
     {
         GuardNotSealed();
         Configuration.ServiceConstructor = constructor;
+    }
+
+    public void AddValueTransformer<TMember>(Func<TMember, TMember> transformer)
+    {
+        GuardNotSealed();
+        ArgumentNullException.ThrowIfNull(transformer);
+        Configuration.GlobalValueTransformers.Add(
+            new ValueTransformerRegistration(typeof(TMember), v => transformer(v is TMember typed ? typed : default!)));
+    }
+
+    /// <summary>Registers a feature. Overloads register global, mapping, and
+    /// runtime features in their respective registries (see
+    /// <see cref="MapperConfiguration.GlobalFeatures"/>,
+    /// <see cref="MapperConfiguration.MappingFeatures"/>, and
+    /// <see cref="MapperConfiguration.RuntimeFeatures"/>).</summary>
+    public void AddFeature(Features.IGlobalFeature feature)
+    {
+        GuardNotSealed();
+        Configuration.GlobalFeatures.Add(feature);
+    }
+    public void AddFeature(Features.IMappingFeature feature)
+    {
+        GuardNotSealed();
+        Configuration.MappingFeatures.Add(feature);
+    }
+    public void AddFeature(Features.IRuntimeFeature feature)
+    {
+        GuardNotSealed();
+        Configuration.RuntimeFeatures.Add(feature);
+    }
+    /// <summary>Registers a feature in every registry whose interface it
+    /// implements, so one object can be both a mapping feature and a runtime
+    /// feature. A feature implementing none of the three interfaces is rejected.</summary>
+    public void AddFeature<TFeature>(TFeature feature) where TFeature : class
+    {
+        GuardNotSealed();
+        bool any = false;
+        if (feature is Features.IGlobalFeature global) { Configuration.GlobalFeatures.Add(global); any = true; }
+        if (feature is Features.IMappingFeature mapping) { Configuration.MappingFeatures.Add(mapping); any = true; }
+        if (feature is Features.IRuntimeFeature runtime) { Configuration.RuntimeFeatures.Add(runtime); any = true; }
+        if (!any)
+            throw new AutoMapperConfigurationException(
+                $"Type {typeof(TFeature).FullName} is not a feature: it must implement IGlobalFeature, IMappingFeature, or IRuntimeFeature.");
     }
 
     public void RecognizePrefixes(params string[] prefixes) => Configuration.SourcePrefixes.AddRange(prefixes);
@@ -141,8 +209,21 @@ public sealed class MapperConfiguration : IConfigurationProvider
     {
         var expression = new MapperConfigurationExpression(this);
         configure(expression);
+        // Stage 3: global features run once, after user configuration and
+        // before sealing, from a snapshot (features they register are not
+        // themselves run in this build). Mapping/runtime features are not
+        // invoked here; they are consulted at map time.
+        foreach (var feature in GlobalFeatures.All)
+            feature.Configure(expression);
         Seal();
     }
+
+    /// <summary>Global features: run once at build (see constructor).</summary>
+    public Features.Features<Features.IGlobalFeature> GlobalFeatures { get; } = new();
+    /// <summary>Mapping features: run around each configured map operation.</summary>
+    public Features.Features<Features.IMappingFeature> MappingFeatures { get; } = new();
+    /// <summary>Runtime features: reachable from resolvers/hooks via ResolutionContext.</summary>
+    public Features.Features<Features.IRuntimeFeature> RuntimeFeatures { get; } = new();
 
     public bool IsSealed { get; private set; }
     internal Dictionary<(Type, Type), MappingPlan> CompiledPlans { get; } = new();
@@ -156,8 +237,21 @@ public sealed class MapperConfiguration : IConfigurationProvider
     public List<string> SourcePostfixes { get; } = new();
     public List<string> DestinationPrefixes { get; } = new();
     public List<string> DestinationPostfixes { get; } = new();
+    /// <summary>Default service construction: default-construct the type.
+    /// Only when that is impossible does the clear configuration error
+    /// fire, telling the caller to register ConstructServicesUsing. A
+    /// registered constructor replaces this default entirely.</summary>
     public Func<Type, object> ServiceConstructor { get; internal set; } = type =>
-        throw new AutoMapperConfigurationException($"No service constructor is configured, so an instance of {type.FullName} cannot be created. Call ConstructServicesUsing during configuration.");
+    {
+        try { return Activator.CreateInstance(type)!; }
+        catch (Exception ex)
+        {
+            throw new AutoMapperConfigurationException(
+                $"No service constructor is configured, so an instance of {type.FullName} cannot be created (it has no usable parameterless constructor). Call ConstructServicesUsing during configuration to supply one.", ex);
+        }
+    };
+    public List<ValueTransformerRegistration> GlobalValueTransformers { get; } = new();
+    IReadOnlyList<ValueTransformerRegistration> IConfigurationProvider.GlobalValueTransformers => GlobalValueTransformers;
 
     public IReadOnlyDictionary<(Type Source, Type Destination), TypeMap> TypeMaps => _typeMaps;
 
@@ -190,12 +284,18 @@ public sealed class MapperConfiguration : IConfigurationProvider
                 MaxDepth = open.MaxDepth,
                 TypeConverterFunc = open.TypeConverterFunc,
                 TypeConverter = open.TypeConverter,
+                TypeConverterType = open.TypeConverterType,
+                ConstructUsingFunc = open.ConstructUsingFunc,
+                ConstructUsingWithContext = open.ConstructUsingWithContext,
             };
             closed.BeforeMapActions.AddRange(open.BeforeMapActions);
             closed.AfterMapActions.AddRange(open.AfterMapActions);
-            // Property maps are re-resolved by name against the closed types at plan time;
-            // custom expressions recorded against open parameters are not replayed, so a
-            // closed map relies on conventional matching plus hooks/converters.
+            closed.BeforeMapActionTypes.AddRange(open.BeforeMapActionTypes);
+            closed.AfterMapActionTypes.AddRange(open.AfterMapActionTypes);
+            closed.ValueTransformers.AddRange(open.ValueTransformers);
+            closed.IgnoredSourceMembers.UnionWith(open.IgnoredSourceMembers);
+            closed.UnvalidatedSourceMembers.UnionWith(open.UnvalidatedSourceMembers);
+            closed.IncludedDerived.AddRange(open.IncludedDerived);
             _closedGenericCache[(source, destination)] = closed;
             return closed;
         }
@@ -226,7 +326,9 @@ public sealed class MapperConfiguration : IConfigurationProvider
         {
             if (map.MemberList == MemberList.Destination)
             {
-                var destProps = map.DestinationType.GetProperties(BindingFlags.Public | BindingFlags.Instance)
+                // STAGE 2 (proxy): same flattened enumeration as TypeMap, so
+                // inherited interface members validate against the proxy shape.
+                var destProps = Execution.ProxyGenerator.GetDestinationProperties(map.DestinationType)
                     .Where(p => p.CanWrite && p.GetSetMethod() != null);
                 foreach (var prop in destProps)
                 {

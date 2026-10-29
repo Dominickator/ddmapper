@@ -1,6 +1,6 @@
-# DDMapper Architecture (Stage 1)
+# DDMapper Architecture
 
-This document is the Stage 1 specification. It describes behaviour derived from
+This document is the architecture specification. It describes behaviour derived from
 the project's own design and from the behavioural evidence inventory (type list,
 method names, and call-graph order) — not from any other implementation's source.
 
@@ -225,3 +225,278 @@ destinations, attribute-driven configuration, the features system, and the full
 value-resolver / converter / transformer surface beyond the basics listed in the
 README. Those are later stages; Stage 1 throws clear, original-worded exceptions
 rather than silently degrading where a later-stage feature is requested.
+
+## 11. Stage 2: runtime proxy generation for interface/abstract destinations
+
+Stage 1's rejection is replaced by `AutoMapper.Execution.ProxyGenerator`
+(Reflection.Emit, original code). For an interface destination it emits a
+concrete class implementing every property (including base-interface
+properties) with a private backing field per property and a parameterless
+constructor; for an abstract destination it emits a subclass overriding every
+abstract property the same way and calling the base parameterless constructor.
+Every proxy implements `INotifyPropertyChanged` and raises
+`PropertyChanged` from every emitted setter, including when the destination
+interface does not itself extend `INotifyPropertyChanged`. Generated types are
+cached per destination type under a lock, so one interface always maps to one
+proxy type. The plan's destination-construction step (`PlanExecutor
+.ConstructDestination`) constructs the proxy; `ConstructUsing` and an existing
+destination still win over it. Additionally, an *unmapped* interface/abstract
+destination is satisfied by a conventional proxy copy in `Mapper.MapInternal`
+(matching source members by name, mapped recursively), which is what makes
+nested interface members and interface collection elements work without an
+explicit map for that pair; a source that already implements the destination
+keeps the Stage 1 assignable behaviour and is returned as-is.
+
+Documented unproxyable boundary (all raised as clear
+`AutoMapperMappingException` from the proxy generator, naming the offending
+member): interface or abstract members that cannot be auto-implemented —
+ordinary methods, events other than `PropertyChanged`, indexers, properties
+declared with conflicting types across base interfaces, abstract classes with
+no parameterless constructor, abstract classes leaving interface methods
+unimplemented, and open generic destinations. Collection interfaces (e.g.
+`IList<T>`) fall under the methods rule and are not proxy destinations;
+concrete collections and arrays remain the way to map collections. Limitation:
+when an abstract base already supplies a concrete `INotifyPropertyChanged`
+implementation, its event is inherited and overridden setters cannot raise
+through the base's private backing field, so no notification is raised for
+those setters.
+
+## 12. Stage 3: attribute-driven configuration and the features system
+
+### 12.1 Attributes (`AutoMapper.Configuration.Annotations`, `src/DDMapper/Attributes.cs`)
+
+Eight attributes, all usable on properties and fields, all inherited:
+
+- `IgnoreAttribute` — the member is skipped and counts as ignored for validation.
+- `SourceMemberAttribute(name)` — redirects a destination member to a named
+  source member; the name may be a dotted chain (`"Customer.Name"`), resolved
+  as a flattened source chain. A name that resolves to nothing throws an
+  `AutoMapperConfigurationException` at build. Meaningful only on destination
+  members.
+- `MappingOrderAttribute(order)` — ordered members are assigned first, in
+  ascending order; unordered members keep their original relative order after
+  them. The plan builder iterates `TypeMap.PropertyMaps` in list order, so
+  `ResolveConventionalMaps` stable-sorts the list to make this observable.
+- `NullSubstituteAttribute(substitute)` — the value used when the resolved
+  source value is null (attribute arguments must be compile-time constants).
+- `UseDestinationValueAttribute` — keeps the existing destination value.
+- `ValueConverterAttribute(type)` — resolves the member through a converter
+  type exposing a `Convert` method, instantiated at build through the
+  configuration's service constructor (`ConstructServicesUsing`).
+- `ValueResolverAttribute(type)` — resolves the member through a resolver
+  type exposing a `Resolve` method, instantiated the same way. A resolver
+  member is assigned even when no source member matches by name.
+- `MapAtRuntimeAttribute` — the source chain is re-resolved by name against
+  the runtime source type at map time (most-derived member wins), so a derived
+  runtime source whose member hides the declared member supplies its own
+  value; with no plan-time chain the destination name is used for the lookup.
+  The fluent `MapAtRuntime` flag gains this same runtime behavior (previously
+  it was stored but inert).
+
+Precedence, highest first, applied per member in `TypeMap.ResolveConventionalMaps`:
+
+1. Explicit fluent configuration (`ForMember` / `ForPath` / `ForSourceMember`).
+   Detected at build time by any fluent-set field (custom expression,
+   resolver, converter, condition, null substitute, `UseDestinationValue`,
+   `MapAtRuntime`) or an Ignored/Custom kind. Fluent members are left
+   untouched by attributes, but a fluent member that only sets a condition,
+   substitute, converter, or flag still gets its conventional source chain
+   (the pre-Stage-3 behavior).
+2. Attributes on the destination member.
+3. Attributes on the terminal source member of the resolved chain
+   (`SourceMember` redirection on a source member has no effect).
+4. Convention (direct match / flattening).
+
+Attribute application happens once, at seal time (and for closed-generic maps
+at first plan build). The plan guard was extended so resolver and
+`MapAtRuntime` members are assigned even with an empty source chain.
+
+### 12.2 Features (`AutoMapper.Features`, `src/DDMapper/Features.cs`)
+
+- `IGlobalFeature.Configure(IMapperConfigurationExpression)` — runs once per
+  `MapperConfiguration`, after the user's configure action and before
+  sealing, from a snapshot of the registered features. It may register maps
+  or further features; features registered by a global feature are not
+  themselves run in the same build.
+- `IMappingFeature.BeforeMap` / `AfterMap` — run around each configured map
+  operation in `PlanExecutor.InvokeBefore` / `InvokeAfter`, outermost around
+  the map's own hooks: features-before, map hooks, member assignment,
+  map hooks, features-after. They fire for every plan invocation, including
+  nested maps reached while mapping a member.
+- `IRuntimeFeature` — a marker. Runtime features are not invoked; they are
+  reachable from resolvers, converters, and hooks through
+  `ResolutionContext.Features` (alias `RuntimeFeatures`), which returns the
+  configuration's registry (empty for a non-DDMapper provider).
+- `Features<T>` — an ordered registry with `Add`, `Get<TFeature>`,
+  `TryGet<TFeature>`, `All`, and `Count`.
+
+Registration is on the configuration expression: `AddFeature` overloads for
+each feature interface, plus generic `AddFeature<TFeature>` which registers
+a feature in every registry whose interface it implements (and rejects a
+type implementing none of them). The plain overloads are ambiguous for a
+type implementing two feature interfaces; the generic overload with an
+explicit type argument is the intended call there. The configuration exposes
+`GlobalFeatures`, `MappingFeatures`, and `RuntimeFeatures`.
+
+Limitations carried forward: attribute-driven configuration applies to
+property maps only, not to path maps or constructor parameters; `IncludeBase`
+copies member options (including the new order flag) at fluent time, so
+attribute values on a base map's destination type are not re-applied to the
+derived map — the derived destination member's own attributes are read
+instead. A resolver/converter attribute without a configured service
+constructor fails at build with the existing "no service constructor"
+configuration error.
+
+## 13. Stage 4: full resolver / converter / transformer surface, service construction, and generics edges
+
+### 13.1 Resolver / converter / transformer surface (object mapping)
+
+- `IValueResolver<TSource, TDestination, TMember>` — fluent instance
+  (`MapFrom(resolver)`) and type-based (`MapFrom<TResolver>()`) forms.
+  The resolver receives the source, the destination, the current
+  destination member value, and the context; the context's `Items`
+  dictionary is now public (`ResolutionContext.Items`), so resolvers
+  read per-operation items supplied through `Map` options.
+- `IMemberValueResolver<TSource, TDestination, TSourceMember, TDestinationMember>`
+  — fluent instance (`MapFrom<TResolver, TSourceMember>(resolver)`) and
+  type-based (`MapFromMember<TResolver, TSourceMember>()`) forms. It
+  receives the source member value as well as the destination member
+  value. The source member value comes from a `MapFrom` expression when
+  one is also configured, else from the conventional chain (re-resolved
+  at runtime for `MapAtRuntime` members), else the default when the
+  member has no source chain — never the whole source object, which is
+  what an empty chain walk would return. A member-resolver result is
+  already in destination-member form, so it skips nested mapping but
+  still passes through a member converter (when one is also configured)
+  and the value transformers. A member-resolver map now gets its
+  conventional source chain resolved at build time like any other
+  fluent member (previously, `Custom`-kind maps skipped chain
+  resolution entirely, which left member resolvers with no source
+  value).
+- `ITypeConverter<TSource, TDestination>` (whole-type) — instance
+  (`ConvertUsing(converter)`), function (`ConvertUsing(func)`), and
+  type-based (`ConvertUsing<TConverter>()`) forms. Converter invocation
+  is duck-typed (`ConverterInvoker`): `Convert(source, destination,
+  context)`, then `Convert(source, destination)`, then
+  `Convert(source)` — so converter classes without a context parameter
+  work through the type-based form, while the interface shape keeps
+  working through the instance form.
+- `IValueConverter<TSourceMember, TDestinationMember>` (member-level)
+  — `ConvertUsing(converter)` on a member, plus type-based
+  `ConvertUsing<TConverter>()`. It is applied after the source value is
+  resolved and before assignment; its result is not mapped again.
+  Member converters (both interface shapes) also work on nested
+  members, because nested member values flow through the same
+  `MapMemberValue` path, and on path maps (`ForPath`), where the
+  converter runs after resolution and before the nested mapping step.
+- Value transformers — `AddValueTransformer` at three levels:
+  configuration-global (`cfg.AddValueTransformer<TMember>(func)`),
+  map-level (`CreateMap(...).AddValueTransformer<TMember>(func)`), and
+  per-member (`ForMember(..., m => m.AddValueTransformer(func))`).
+  They run, in registration order within each level, global first,
+  then map-level, then member-level. A global or map-level transformer
+  applies only to members whose destination type its member type
+  covers (assignable check); a member transformer applies to its own
+  member. Order relative to the rest of the pipeline: resolver /
+  converter first, then nested mapping, then transformers, so a
+  transformer sees the final mapped value. Only values the map actually
+  produces are transformed: a null substitute is transformed, but a
+  kept destination value (`UseDestinationValue`, failed precondition
+  or condition, skipped null) is returned untouched.
+- `IMappingAction<TSource, TDestination>` — instance
+  (`BeforeMap(action)` / `AfterMap(action)`) and type-based
+  (`BeforeMap<TAction>()` / `AfterMap<TAction>()`) hooks, running in
+  the same slots as the delegate hooks (features outermost, then map
+  hooks, in registration order).
+
+### 13.2 Service construction (`ConstructServicesUsing`)
+
+Every place the runtime instantiates a user type now routes through
+the configuration's service constructor when one is registered:
+
+- Fluent type-based resolvers, member resolvers, member converters,
+  whole-type converters, and mapping actions are recorded as types and
+  instantiated once at build time (`TypeMap.ResolveDeferredServices`,
+  called from `ResolveConventionalMaps`, so closed-generic maps get
+  the same treatment at first plan build). The resolution is
+  idempotent: each type is cleared after instantiation.
+- Attribute resolvers and converters (unchanged mechanism) and
+  profile types without a parameterless constructor (new: `AddProfiles`
+  falls back to the service constructor when default construction
+  fails).
+- Whole-type converter types are also resolved in `PlanBuilder` as a
+  fallback for maps compiled without the seal-time step.
+
+The default service constructor changed in this stage, superseding the
+Stage 3 note: with no `ConstructServicesUsing` registered, it now
+default-constructs the type, and only when that is impossible does it
+raise the existing clear `AutoMapperConfigurationException` (naming
+the type and `ConstructServicesUsing`). A parameterless resolver,
+converter, or action therefore works with no explicit constructor;
+a type needing constructor arguments without a registered constructor
+still fails clearly at build time, not at first map.
+
+### 13.3 Projection interaction
+
+Nothing in this stage is silently dropped or client-evaluated in
+`ProjectTo`. Each category either projects (when genuinely
+translatable) or is rejected with `AutoMapperProjectionException`:
+
+- Works: a converter expressed as a translatable `MapFrom` expression
+  (the pre-existing projection path).
+- Rejected: value resolvers, member value resolvers, member
+  converters, value converters, whole-type converters (now including
+  the type-based form), mapping actions / BeforeMap / AfterMap hooks
+  (previously hooks were silently dropped in projection; they are now
+  rejected, including on the derived-dispatch base body), value
+  transformers at member, map, and global level (a global transformer
+  rejects only members whose destination type it covers; a global
+  transformer covering no member of the projected pair does not block
+  projection), and converters / resolvers / transformers on path maps
+  (carried into nested path bindings so nested rejections fire too).
+
+### 13.4 Generics edges
+
+- Closed-generic maps now inherit more than hooks and whole-type
+  converters from their open map: map-level transformers, mapping
+  action types, the whole-type converter type, construction functions,
+  ignored / unvalidated source members, and included-derived pairs.
+  The non-generic map handle also gained `BeforeMap`, `AfterMap`, and
+  `AddValueTransformer`, so hooks and transformers on an open map are
+  reachable through the public API.
+- Generic collection element mapping, nested generics
+  (`Wrapper<Wrapper<int>>`), generic interface destinations via
+  proxies, and generic derived-type dispatch all map through the
+  existing collection / proxy / dispatch paths (tested).
+- Nested member dispatch now mirrors the top level: a nested value
+  tries its runtime type's map first, then the declared member type's
+  map. Previously nested values dispatched on the runtime type only,
+  so a derived nested source with only a base map failed instead of
+  mapping through the base plan — which is also what makes
+  `MapAtRuntime` on a nested map observe the derived runtime source.
+  Existing behaviour is preserved when a runtime map exists.
+
+### 13.5 Open-generic custom-expression limit: documented, with reason
+
+The Stage 1 limit stays a limit, and the reason is now precise rather
+than "not replayed":
+
+1. .NET expression trees cannot hold a lambda over an open generic
+   type at all: `Expression.Parameter` rejects a generic definition
+   and also rejects any type containing a generic parameter (both
+   verified against the framework). There is therefore no expression
+   tree form in which a custom member expression "recorded against
+   open type parameters" could exist.
+2. The public open-map handle (`CreateMap(Type, Type)`) exposes no
+   per-member surface, so no custom member expression can be recorded
+   on an open map through the public API in the first place.
+
+Consequence: closed maps rely on conventional matching plus the
+inherited map-level state listed in 13.4, and never silently carry a
+stale custom expression. A test pins both halves: building a parameter
+over the open definition (or over a generic-parameter instantiation)
+throws `ArgumentException`, and a closed pair from an open map still
+maps its members conventionally. Implementing a replay pass was
+considered and rejected as unsound: the only expressions that could
+be copied would be ones over closed types, which rebasing onto a
+different closed pair would misbind.

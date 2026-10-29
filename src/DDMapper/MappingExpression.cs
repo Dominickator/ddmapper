@@ -67,6 +67,21 @@ public sealed class MemberConfigurationExpression<TSource, TDestination, TMember
         if (_propertyMap != null) { _propertyMap.Resolver = resolver; _propertyMap.Kind = PropertyMapKind.Custom; }
         else if (_pathMap != null) _pathMap.Resolver = resolver;
     }
+    public void MapFrom<TResolver>() where TResolver : class, IValueResolver<TSource, TDestination, TMember>
+    {
+        if (_propertyMap != null) { _propertyMap.ResolverType = typeof(TResolver); _propertyMap.Kind = PropertyMapKind.Custom; }
+        else if (_pathMap != null) _pathMap.ResolverType = typeof(TResolver);
+    }
+    public void MapFrom<TResolver, TSourceMember>(TResolver resolver) where TResolver : IMemberValueResolver<TSource, TDestination, TSourceMember, TMember>
+    {
+        if (_propertyMap != null) { _propertyMap.MemberResolver = resolver; _propertyMap.Kind = PropertyMapKind.Custom; }
+        else if (_pathMap != null) _pathMap.MemberResolver = resolver;
+    }
+    public void MapFromMember<TResolver, TSourceMember>() where TResolver : class, IMemberValueResolver<TSource, TDestination, TSourceMember, TMember>
+    {
+        if (_propertyMap != null) { _propertyMap.MemberResolverType = typeof(TResolver); _propertyMap.Kind = PropertyMapKind.Custom; }
+        else if (_pathMap != null) _pathMap.MemberResolverType = typeof(TResolver);
+    }
     public void Ignore()
     {
         if (_propertyMap != null) _propertyMap.Kind = PropertyMapKind.Ignored;
@@ -92,6 +107,23 @@ public sealed class MemberConfigurationExpression<TSource, TDestination, TMember
     public void ConvertUsing(ITypeConverter<object, TMember> converter)
     {
         if (_propertyMap != null) _propertyMap.TypeConverter = converter;
+        else if (_pathMap != null) _pathMap.TypeConverter = converter;
+    }
+    public void ConvertUsing<TSourceMember>(IValueConverter<TSourceMember, TMember> converter)
+    {
+        if (_propertyMap != null) _propertyMap.TypeConverter = converter;
+        else if (_pathMap != null) _pathMap.TypeConverter = converter;
+    }
+    public void ConvertUsing<TConverter>() where TConverter : class
+    {
+        if (_propertyMap != null) _propertyMap.ConverterType = typeof(TConverter);
+        else if (_pathMap != null) _pathMap.ConverterType = typeof(TConverter);
+    }
+    public void AddValueTransformer(Func<TMember, TMember> transformer)
+    {
+        ArgumentNullException.ThrowIfNull(transformer);
+        if (_propertyMap != null) _propertyMap.ValueTransformers.Add(v => transformer(v is TMember typed ? typed : default!));
+        else if (_pathMap != null) _pathMap.ValueTransformers.Add(v => transformer(v is TMember typed ? typed : default!));
     }
     public void MapAtRuntime()
     {
@@ -194,6 +226,48 @@ public sealed class MappingExpression<TSource, TDestination> : IMappingExpressio
         return this;
     }
 
+    public IMappingExpression<TSource, TDestination> ConvertUsing<TConverter>() where TConverter : class
+    {
+        GuardSealed();
+        TypeMap.TypeConverterType = typeof(TConverter);
+        return this;
+    }
+
+    public IMappingExpression<TSource, TDestination> BeforeMap<TAction>() where TAction : class, IMappingAction<TSource, TDestination>
+    {
+        GuardSealed();
+        TypeMap.BeforeMapActionTypes.Add(typeof(TAction));
+        return this;
+    }
+    public IMappingExpression<TSource, TDestination> BeforeMap(IMappingAction<TSource, TDestination> action)
+    {
+        GuardSealed();
+        ArgumentNullException.ThrowIfNull(action);
+        TypeMap.BeforeMapActions.Add((s, d, ctx) => action.Process((TSource)s, (TDestination)d, ctx));
+        return this;
+    }
+    public IMappingExpression<TSource, TDestination> AfterMap<TAction>() where TAction : class, IMappingAction<TSource, TDestination>
+    {
+        GuardSealed();
+        TypeMap.AfterMapActionTypes.Add(typeof(TAction));
+        return this;
+    }
+    public IMappingExpression<TSource, TDestination> AfterMap(IMappingAction<TSource, TDestination> action)
+    {
+        GuardSealed();
+        ArgumentNullException.ThrowIfNull(action);
+        TypeMap.AfterMapActions.Add((s, d, ctx) => action.Process((TSource)s, (TDestination)d, ctx));
+        return this;
+    }
+
+    public IMappingExpression<TSource, TDestination> AddValueTransformer<TMember>(Func<TMember, TMember> transformer)
+    {
+        GuardSealed();
+        ArgumentNullException.ThrowIfNull(transformer);
+        TypeMap.ValueTransformers.Add(new ValueTransformerRegistration(typeof(TMember), v => transformer(v is TMember typed ? typed : default!)));
+        return this;
+    }
+
     public IMappingExpression<TSource, TDestination> ConstructUsing(Func<TSource, TDestination> constructor)
     {
         GuardSealed();
@@ -255,6 +329,17 @@ public sealed class MappingExpression<TSource, TDestination> : IMappingExpressio
                     copy.PreCondition = pm.PreCondition;
                     copy.NullSubstitute = pm.NullSubstitute;
                     copy.HasNullSubstitute = pm.HasNullSubstitute;
+                    // Stage 3: carry the remaining member options across too.
+                    copy.UseDestinationValue = pm.UseDestinationValue;
+                    copy.MapAtRuntime = pm.MapAtRuntime;
+                    copy.TypeConverter = pm.TypeConverter;
+                    copy.ConverterType = pm.ConverterType;
+                    copy.ResolverType = pm.ResolverType;
+                    copy.MemberResolver = pm.MemberResolver;
+                    copy.MemberResolverType = pm.MemberResolverType;
+                    copy.ValueTransformers.AddRange(pm.ValueTransformers);
+                    copy.MappingOrder = pm.MappingOrder;
+                    copy.HasMappingOrder = pm.HasMappingOrder;
                 }
             }
         return this;

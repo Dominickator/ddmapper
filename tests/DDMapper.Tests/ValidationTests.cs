@@ -102,12 +102,13 @@ public class ValidationTests
         string? Name { get; set; }
     }
 
+    // STAGE 2: superseded by proxy support — the interface dry run now
+    // succeeds because the plan constructs a proxy.
     [Fact]
-    public void InterfaceDestinationFailsValidationDryRun()
+    public void InterfaceDestinationValidatesClean()
     {
         var config = new MapperConfiguration(cfg => cfg.CreateMap<Source, IShaped>());
-        var ex = Assert.Throws<AutoMapperConfigurationException>(() => config.AssertConfigurationIsValid());
-        Assert.Contains("Dry run", ex.Message);
+        config.AssertConfigurationIsValid();
     }
 
     [Fact]
